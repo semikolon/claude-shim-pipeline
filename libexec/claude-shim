@@ -1,0 +1,14 @@
+#!/bin/sh
+#
+# Generic Claude Shim - Forwards all calls to the main dispatcher
+# This ensures consistent execution path: shim → dispatcher → wrapper → real binary
+#
+# Called as: ~/.config/claude/shims/claude [args...]
+# Forwards to: ~/.config/claude/libexec/claude-dispatcher "claude" [args...]
+
+# Get the command name (e.g., "claude") from how this script was invoked
+CMD_NAME=$(basename "$0")
+
+# Execute the main dispatcher with absolute path to avoid recursion
+# Pass the command name as first argument, followed by all original arguments
+exec "$HOME/.config/claude/libexec/claude-dispatcher" "$CMD_NAME" "$@"

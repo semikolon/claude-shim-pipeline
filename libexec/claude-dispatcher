@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#
+# Claude Dispatcher - Shim-based architecture
+# Called by shim: ~/bin/claude-dispatcher "claude" [args...]
+#
+# Provides consistent execution path: shim → dispatcher → wrapper → real binary
+# Supports --native flag to bypass CCR wrapper
+
+set -euo pipefail
+
+# First argument is the command name from the shim
+CMD_NAME="$1"
+shift
+
+# Configuration
+WRAPPER_BASE_DIR="$HOME/.config/claude/wrappers.d"
+WRAPPER_ORDER=("ccr" "serena")  # ccr first, then serena
+
+# Check for --native flag and remove it from arguments
+ARGS=()
+USE_NATIVE=false
+
+for arg in "$@"; do
+    if [[ "$arg" == "--native" ]]; then
+        USE_NATIVE=true
+    else
+        ARGS+=("$arg")
+    fi
+done
+
+# Find the real claude binary (excluding shims and wrappers)
+# Create a clean PATH without our managed directories
+CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -E "(claude/shims|claude/wrappers)" | tr '\n' ':' | sed 's/:$//')
+REAL_CLAUDE=$(PATH="$CLEAN_PATH" command -v claude)
+
+if [[ -z "$REAL_CLAUDE" ]]; then
+    echo "❌ DISPATCHER: Error: Real claude binary not found in system PATH" >&2
+    exit 1
+fi
+
+# Export real claude location for wrappers to use directly
+export CLAUDE_REAL_BINARY="$REAL_CLAUDE"
+
+# Build list of active shims
+ACTIVE_SHIMS=()
+if [[ "$USE_NATIVE" == "true" ]]; then
+    # In native mode, only serena runs
+    if [[ -x "$WRAPPER_BASE_DIR/serena/$CMD_NAME" ]]; then
+        ACTIVE_SHIMS+=("serena")
+    fi
+    # CCR is skipped in native mode
+    if [[ -x "$WRAPPER_BASE_DIR/ccr/$CMD_NAME" ]]; then
+        ACTIVE_SHIMS+=("ccr (skipping in --native mode)")
+    fi
+    # Add future shims here with appropriate native mode handling
+else
+    # In standard mode, check all available wrappers
+    for wrapper in "${WRAPPER_ORDER[@]}"; do
+        if [[ -x "$WRAPPER_BASE_DIR/$wrapper/$CMD_NAME" ]]; then
+            ACTIVE_SHIMS+=("$wrapper")
+        fi
+    done
+fi
+
+# Display the clean summary line
+if [[ ${#ACTIVE_SHIMS[@]} -gt 0 ]]; then
+    shim_list=$(IFS=', '; echo "${ACTIVE_SHIMS[*]}")
+    echo "✨ Claude Code shims active: $shim_list" >&2
+fi
+
+# Find the first available wrapper based on mode and order
+WRAPPER_TO_USE=""
+
+if [[ "$USE_NATIVE" == "true" ]]; then
+    if [[ -x "$WRAPPER_BASE_DIR/serena/$CMD_NAME" ]]; then
+        WRAPPER_TO_USE="$WRAPPER_BASE_DIR/serena/$CMD_NAME"
+    fi
+else
+    # Initialize pipeline stage if not set (starts at 0)
+    PIPELINE_STAGE="${CLAUDE_PIPELINE_STAGE:-0}"
+    
+    # Check if we're still within the wrapper pipeline
+    if (( PIPELINE_STAGE < ${#WRAPPER_ORDER[@]} )); then
+        # Get current wrapper name from array (generic!)
+        WRAPPER_NAME="${WRAPPER_ORDER[PIPELINE_STAGE]}"
+        WRAPPER_PATH="$WRAPPER_BASE_DIR/$WRAPPER_NAME/$CMD_NAME"
+        
+        if [[ -x "$WRAPPER_PATH" ]]; then
+            # Execute wrapper with incremented stage for next iteration
+            export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
+            WRAPPER_TO_USE="$WRAPPER_PATH"
+        else
+            # Skip missing wrapper by incrementing stage and re-dispatching
+            export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
+            exec "$0" "$CMD_NAME" "$@"
+        fi
+    else
+        # End of pipeline - all wrappers have run, use real Claude
+        WRAPPER_TO_USE=""
+    fi
+fi
+
+# Execute the chosen wrapper or fall back to real binary
+if [[ -n "$WRAPPER_TO_USE" ]]; then
+    exec "$WRAPPER_TO_USE" "${ARGS[@]}"
+else
+    exec "$REAL_CLAUDE" "${ARGS[@]}"
+fi

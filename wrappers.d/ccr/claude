@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+# CCR (Claude Code Router) wrapper - Composable wrapper pattern
+# Routes Claude Code requests through CCR when available
+
+# Get the directory of the currently executing script
+this_dir=$(dirname "$0")
+
+# Find next claude: use CLAUDE_REAL_BINARY if set (dispatcher mode), 
+# otherwise find next in PATH (standalone mode)
+if [ -n "${CLAUDE_REAL_BINARY:-}" ]; then
+    next_claude="$CLAUDE_REAL_BINARY"
+else
+    filtered_path=$(echo "${PATH}" | tr ':' '\n' | grep -Fxv "${this_dir}" | paste -sd: -)
+    
+    if [ -z "${filtered_path}" ]; then
+        echo "❌ CCR: Could not filter PATH (broken chain)" >&2
+        exit 127
+    fi
+    
+    next_claude=$(PATH="${filtered_path}" command -v claude)
+    if [ -z "${next_claude}" ]; then
+        echo "❌ CCR: Could not find next 'claude' executable in chain" >&2
+        exit 127
+    fi
+fi
+
+# Check if CCR is available and configured
+if command -v ccr >/dev/null 2>&1; then
+    # Check if CCR service is running, start if needed
+    if ! ccr status >/dev/null 2>&1; then
+        ccr start >/dev/null 2>&1 || {
+            exec "${next_claude}" "$@"
+        }
+    fi
+    
+    # Check if we're in pipeline mode or standalone mode
+    if [[ -n "${CLAUDE_PIPELINE_STAGE:-}" ]]; then
+        # In pipeline mode, DON'T clean PATH - let ccr code find the shim
+        # This allows the next wrapper (Serena) to run when ccr code calls claude
+        exec ccr code "$@"
+    else
+        # In standalone mode, clean PATH to avoid infinite recursion
+        SHIM_DIR="$HOME/.config/claude/shims"
+        CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^$SHIM_DIR$" | tr '\n' ':' | sed 's/:$//')
+        
+        # Ensure real claude directory is in the clean path
+        REAL_CLAUDE_DIR=$(dirname "$CLAUDE_REAL_BINARY")
+        if ! echo "$CLEAN_PATH" | grep -q "$REAL_CLAUDE_DIR"; then
+            CLEAN_PATH="$REAL_CLAUDE_DIR:$CLEAN_PATH"
+        fi
+        
+        PATH="$CLEAN_PATH" exec ccr code "$@"
+    fi
+else
+    # CCR not available, pass through to next wrapper/claude
+    exec "${next_claude}" "$@"
+fi

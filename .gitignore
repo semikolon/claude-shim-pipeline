@@ -1,0 +1,26 @@
+# Local runtime files
+*.log
+.DS_Store
+
+# User-specific configurations
+local/
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+
+# Cache directories  
+.cache/
+cache/
+
+# Process ID files
+*.pid
+
+# Lock files
+*.lock
+lock/
+
+# System files
+Thumbs.db
