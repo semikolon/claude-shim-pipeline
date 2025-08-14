@@ -25,7 +25,7 @@ The shim pipeline implements a **staged interception pattern** where each tool g
 flowchart TD
     A[User runs: claude -p "hello"] 
     B[PATH finds: ~/.config/claude/shims/claude]
-    C[Shim forwards to: ~/bin/claude-dispatcher]
+    C[Shim forwards to: ~/.config/claude/libexec/claude-dispatcher]
     D[Dispatcher determines active wrappers]
     E[Stage 0: CCR Wrapper]
     F[Stage 1: Serena Wrapper] 
@@ -56,15 +56,13 @@ flowchart TD
 ├── shims/
 │   └── claude                    # PATH interception point
 ├── libexec/
-│   └── claude-shim               # Generic shim template
+│   ├── claude-shim               # Generic shim template
+│   └── claude-dispatcher         # Central pipeline orchestrator
 └── wrappers.d/                   # Wrapper implementations
     ├── ccr/
     │   └── claude                # Claude Code Router integration
     └── serena/
         └── claude                # Serena MCP server integration
-
-~/bin/
-└── claude-dispatcher             # Central pipeline orchestrator
 ```
 
 ## 🔄 Execution Flow
@@ -72,7 +70,7 @@ flowchart TD
 ### Standard Mode (`claude -p "hello"`)
 
 1. **PATH Resolution**: System finds `~/.config/claude/shims/claude` first
-2. **Shim Forwarding**: Shim calls `~/bin/claude-dispatcher "claude" -p "hello"`
+2. **Shim Forwarding**: Shim calls `~/.config/claude/libexec/claude-dispatcher "claude" -p "hello"`
 3. **Pipeline Orchestration**: Dispatcher manages staged execution:
    - **Stage 0**: CCR wrapper processes command, calls dispatcher for next stage
    - **Stage 1**: Serena wrapper starts MCP server, calls real Claude binary
