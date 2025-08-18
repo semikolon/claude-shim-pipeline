@@ -62,8 +62,9 @@ else
     done
 fi
 
-# Display the clean summary line
-if [[ ${#ACTIVE_SHIMS[@]} -gt 0 ]]; then
+# Display the clean summary line (only on initial call, not recursive pipeline stages)
+PIPELINE_STAGE="${CLAUDE_PIPELINE_STAGE:-0}"
+if [[ ${#ACTIVE_SHIMS[@]} -gt 0 ]] && [[ "$PIPELINE_STAGE" -eq 0 ]]; then
     shim_list=$(IFS=', '; echo "${ACTIVE_SHIMS[*]}")
     echo "✨ Claude Code shims active: $shim_list" >&2
 fi
@@ -76,9 +77,6 @@ if [[ "$USE_NATIVE" == "true" ]]; then
         WRAPPER_TO_USE="$WRAPPER_BASE_DIR/serena/$CMD_NAME"
     fi
 else
-    # Initialize pipeline stage if not set (starts at 0)
-    PIPELINE_STAGE="${CLAUDE_PIPELINE_STAGE:-0}"
-    
     # Check if we're still within the wrapper pipeline
     if (( PIPELINE_STAGE < ${#WRAPPER_ORDER[@]} )); then
         # Get current wrapper name from array (generic!)
