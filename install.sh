@@ -206,7 +206,7 @@ create_dispatcher_template() {
 # Called by shim: ~/bin/claude-dispatcher "claude" [args...]
 #
 # Provides consistent execution path: shim → dispatcher → wrapper → real binary
-# Supports --native flag to bypass CCR wrapper
+# Supports --ccr flag to enable CCR wrapper (default: native Claude + Serena only)
 
 set -euo pipefail
 
@@ -218,13 +218,13 @@ shift
 WRAPPER_BASE_DIR="$HOME/.config/claude/wrappers.d"
 WRAPPER_ORDER=("ccr" "serena")  # ccr first, then serena
 
-# Check for --native flag and remove it from arguments
+# Check for --ccr flag and remove it from arguments
 ARGS=()
-USE_NATIVE=false
+USE_CCR=false
 
 for arg in "$@"; do
-    if [[ "$arg" == "--native" ]]; then
-        USE_NATIVE=true
+    if [[ "$arg" == "--ccr" ]]; then
+        USE_CCR=true
     else
         ARGS+=("$arg")
     fi
@@ -245,21 +245,22 @@ export CLAUDE_REAL_BINARY="$REAL_CLAUDE"
 
 # Build list of active shims
 ACTIVE_SHIMS=()
-if [[ "$USE_NATIVE" == "true" ]]; then
-    # In native mode, only serena runs
-    if [[ -x "$WRAPPER_BASE_DIR/serena/$CMD_NAME" ]]; then
-        ACTIVE_SHIMS+=("serena")
-    fi
-    # CCR is skipped in native mode
-    if [[ -x "$WRAPPER_BASE_DIR/ccr/$CMD_NAME" ]]; then
-        ACTIVE_SHIMS+=("ccr (skipping in --native mode)")
-    fi
-    # Add future shims here with appropriate native mode handling
-else
-    # In standard mode, check all available wrappers
+if [[ "$USE_CCR" == "true" ]]; then
+    # In CCR mode, check all available wrappers
     for wrapper in "${WRAPPER_ORDER[@]}"; do
         if [[ -x "$WRAPPER_BASE_DIR/$wrapper/$CMD_NAME" ]]; then
             ACTIVE_SHIMS+=("$wrapper")
+        fi
+    done
+else
+    # In default mode, all wrappers except CCR are enabled
+    for wrapper in "${WRAPPER_ORDER[@]}"; do
+        if [[ -x "$WRAPPER_BASE_DIR/$wrapper/$CMD_NAME" ]]; then
+            if [[ "$wrapper" == "ccr" ]]; then
+                ACTIVE_SHIMS+=("ccr (skipping, use --ccr to enable)")
+            else
+                ACTIVE_SHIMS+=("$wrapper")
+            fi
         fi
     done
 fi
@@ -273,11 +274,8 @@ fi
 # Find the first available wrapper based on mode and order
 WRAPPER_TO_USE=""
 
-if [[ "$USE_NATIVE" == "true" ]]; then
-    if [[ -x "$WRAPPER_BASE_DIR/serena/$CMD_NAME" ]]; then
-        WRAPPER_TO_USE="$WRAPPER_BASE_DIR/serena/$CMD_NAME"
-    fi
-else
+if [[ "$USE_CCR" == "true" ]]; then
+    # In CCR mode, use full pipeline
     # Initialize pipeline stage if not set (starts at 0)
     PIPELINE_STAGE="${CLAUDE_PIPELINE_STAGE:-0}"
     
@@ -289,6 +287,31 @@ else
         
         if [[ -x "$WRAPPER_PATH" ]]; then
             # Execute wrapper with incremented stage for next iteration
+            export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
+            WRAPPER_TO_USE="$WRAPPER_PATH"
+        else
+            # Skip missing wrapper by incrementing stage and re-dispatching
+            export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
+            exec "$0" "$CMD_NAME" "$@"
+        fi
+    else
+        # End of pipeline - all wrappers have run, use real Claude
+        WRAPPER_TO_USE=""
+    fi
+else
+    # In default mode, use pipeline but skip CCR
+    # Check if we're still within the wrapper pipeline
+    if (( PIPELINE_STAGE < ${#WRAPPER_ORDER[@]} )); then
+        # Get current wrapper name from array
+        WRAPPER_NAME="${WRAPPER_ORDER[PIPELINE_STAGE]}"
+        WRAPPER_PATH="$WRAPPER_BASE_DIR/$WRAPPER_NAME/$CMD_NAME"
+        
+        if [[ "$WRAPPER_NAME" == "ccr" ]]; then
+            # Skip CCR in default mode by incrementing stage and re-dispatching
+            export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
+            exec "$0" "$CMD_NAME" "$@"
+        elif [[ -x "$WRAPPER_PATH" ]]; then
+            # Execute non-CCR wrapper with incremented stage for next iteration
             export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
             WRAPPER_TO_USE="$WRAPPER_PATH"
         else

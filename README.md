@@ -8,13 +8,13 @@ A composable shim architecture for extending Claude Code with multiple tool inte
 # Install (assumes you have claude, ccr, and uvx installed)
 ./install.sh
 
-# Use normally - shims are transparent
+# Use normally - shims are transparent (CCR skipped by default)
 claude -p "Hello world"
-# ✨ Claude Code shims active: ccr, serena
+# ✨ Claude Code shims active: serena, ccr (skipping, use --ccr to enable)
 
-# Skip CCR in native mode  
-claude --native --add-dir ~/project
-# ✨ Claude Code shims active: serena, ccr (skipping in --native mode)
+# Enable CCR with --ccr flag
+claude --ccr --add-dir ~/project
+# ✨ Claude Code shims active: ccr, serena
 ```
 
 ## 🏗️ Architecture Overview
@@ -45,7 +45,7 @@ flowchart TD
 2. **Transparent Operation**: User runs `claude` normally, shims work invisibly  
 3. **Composable Pipeline**: Easy to add/remove/reorder tools through wrapper system
 4. **Safe Fallbacks**: Missing tools are skipped gracefully, always reaches real Claude
-5. **Mode Support**: `--native` flag bypasses selected wrappers (like CCR) when needed
+5. **Mode Support**: `--ccr` flag enables CCR wrapper (skipped by default)
 
 ## 📁 File Structure
 
@@ -67,20 +67,20 @@ flowchart TD
 
 ## 🔄 Execution Flow
 
-### Standard Mode (`claude -p "hello"`)
+### Default Mode (`claude -p "hello"`)
 
 1. **PATH Resolution**: System finds `~/.config/claude/shims/claude` first
 2. **Shim Forwarding**: Shim calls `~/.config/claude/libexec/claude-dispatcher "claude" -p "hello"`
 3. **Pipeline Orchestration**: Dispatcher manages staged execution:
-   - **Stage 0**: CCR wrapper processes command, calls dispatcher for next stage
+   - **Stage 0**: CCR is skipped by default
    - **Stage 1**: Serena wrapper starts MCP server, calls real Claude binary
-4. **Final Execution**: Real Claude runs with full tool integration active
+4. **Final Execution**: Real Claude runs with Serena integration active
 
-### Native Mode (`claude --native --add-dir ~/project`)
+### CCR Mode (`claude --ccr --add-dir ~/project`)
 
-1. **FLAG Detection**: Dispatcher detects `--native` flag, removes from args
-2. **Wrapper Selection**: Only Serena runs (CCR is bypassed)
-3. **Execution**: Serena → Real Claude (with CCR skipped)
+1. **FLAG Detection**: Dispatcher detects `--ccr` flag, removes from args
+2. **Wrapper Selection**: Full pipeline runs (CCR + Serena)
+3. **Execution**: CCR → Serena → Real Claude
 
 ### Pipeline Stage Tracking
 
@@ -105,7 +105,7 @@ The `CLAUDE_PIPELINE_STAGE` environment variable tracks progression:
 **Purpose**: Orchestrate the wrapper pipeline and manage execution flow
 
 **Key Features**:
-- **Mode Detection**: Handles `--native` flag for selective wrapper bypass
+- **Mode Detection**: Handles `--ccr` flag for selective wrapper enablement
 - **Stage Management**: Tracks pipeline progression through environment variables  
 - **Wrapper Discovery**: Dynamically finds available wrappers in order
 - **Clean Summary**: Shows single line of active shims instead of verbose debug

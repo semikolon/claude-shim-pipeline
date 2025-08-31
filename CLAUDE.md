@@ -82,7 +82,7 @@ WRAPPER_ORDER=("ccr" "serena")  # ccr first, then serena
 2. **Transparent Operation** - User runs `claude` normally, shims work invisibly
 3. **Composable Pipeline** - Easy to add/remove/reorder tools through wrapper system
 4. **Safe Fallbacks** - Missing tools are skipped gracefully, always reaches real Claude
-5. **Mode Support** - `--native` flag bypasses selected wrappers when needed
+5. **Mode Support** - `--ccr` flag enables CCR wrapper (skipped by default)
 
 ## File Structure
 
