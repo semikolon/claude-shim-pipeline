@@ -78,6 +78,52 @@ fi
 # Rationale: git root gives us consistent project boundaries, PWD fallback for non-git projects
 project_root=$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${PWD}")
 
+# System Directory Protection: Skip Serena for problematic system paths
+# Rationale: Prevents massive indexing scope that can consume 38GB+ and cause performance hangs
+is_system_directory() {
+    local path="$1"
+    
+    # Normalize path to handle symlinks and relative paths
+    local normalized_path
+    normalized_path=$(cd "$path" 2>/dev/null && pwd -P) || normalized_path="$path"
+    
+    # System directories that should skip Serena indexing
+    case "$normalized_path" in
+        "$HOME" | \
+        "$HOME/" | \
+        "/Users/$USER" | \
+        "/Users/$USER/" | \
+        "/Library"* | \
+        "/System"* | \
+        "/Applications"* | \
+        "/private"* | \
+        "/tmp"* | \
+        "/var"* | \
+        "/usr"* | \
+        "/opt"* | \
+        "/etc"* | \
+        "$HOME/Library"* | \
+        "$HOME/Applications"* | \
+        "$HOME/Desktop" | \
+        "$HOME/Downloads" | \
+        "$HOME/Documents" | \
+        "$HOME/.Trash"* | \
+        "$HOME/.cache"* | \
+        "$HOME/.local"* )
+            return 0  # Is system directory
+            ;;
+        *)
+            return 1  # Safe for Serena indexing
+            ;;
+    esac
+}
+
+# Check if current project is in a system directory
+if is_system_directory "$project_root"; then
+    # Execute Claude without Serena - no MCP server startup needed
+    exec "${real_claude}" "$@"
+fi
+
 # Create cache directory for this project (based on path hash)
 # Rationale: Path hash ensures unique, consistent cache per project, survives directory renames
 project_hash=$(echo -n "${project_root}" | shasum | cut -d' ' -f1)
@@ -86,19 +132,243 @@ mkdir -p "${cache_dir}"  # Create now to ensure it exists for all subsequent ope
 
 # Cache file paths - these track Serena state per project
 port_file="${cache_dir}/port"      # Stores the port Serena is running on
-pid_file="${cache_dir}/pid"        # Stores the PID of the Serena process  
+pid_file="${cache_dir}/pid"        # Stores the PID of the Serena process
 log_file="${cache_dir}/serena.log" # Serena's stdout/stderr for debugging
+refcount_dir="${cache_dir}/refs"   # Reference counting for multi-session support
+health_check_interval=60           # Check parent Claude process every 60 seconds
+health_state_file="${cache_dir}/health.state"  # Shared server health state across monitors
 
-# Function to check if Serena is healthy on given port (safe, non-SSE endpoint)
+
+# Reference counting functions for multi-session support
+increment_refcount() {
+    local claude_pid="$1"
+    
+    mkdir -p "${refcount_dir}"
+    local refcount_file="${refcount_dir}/sessions.refs"
+    local lockfile="${refcount_dir}/sessions.lock"
+    
+    # Atomic increment using flock for race condition safety
+    (
+        exec 200>"$lockfile"
+        flock -x 200
+        echo "$claude_pid" >> "$refcount_file"
+        # Quiet increment
+    )
+}
+
+decrement_refcount() {
+    local claude_pid="$1"
+    
+    local refcount_file="${refcount_dir}/sessions.refs"
+    local lockfile="${refcount_dir}/sessions.lock"
+    
+    if [[ ! -f "$refcount_file" ]]; then
+        return 0  # No refs to decrement
+    fi
+    
+    # Atomic decrement using flock
+    (
+        exec 200>"$lockfile"
+        flock -x 200
+        # Remove this PID from refcount file
+        if [[ -f "$refcount_file" ]]; then
+            grep -v "^$claude_pid$" "$refcount_file" > "$refcount_file.tmp" || true
+            mv "$refcount_file.tmp" "$refcount_file"
+            
+            # Check if file is empty (no more references)
+            if [[ ! -s "$refcount_file" ]]; then
+                rm -f "$refcount_file"
+                # Last reference removed
+                return 1  # Signal to cleanup server
+            fi
+        fi
+    )
+}
+
+get_refcount() {
+    local refcount_file="${refcount_dir}/sessions.refs"
+
+    if [[ -f "$refcount_file" ]]; then
+        wc -l < "$refcount_file" | tr -d ' '
+    else
+        echo "0"
+    fi
+}
+
+# Startup cleanup: Remove dead PIDs from reference file
+# Called once per wrapper invocation (when starting new Claude session)
+# Runs inside lock, so safe from races with other wrappers/monitors
+cleanup_dead_refs() {
+    local refcount_file="${refcount_dir}/sessions.refs"
+
+    # Early exit if no refs file exists yet
+    [[ ! -f "$refcount_file" ]] && return 0
+
+    # Use temp file for atomic update
+    local temp_file="${refcount_file}.tmp"
+    > "$temp_file"
+
+    local alive_count=0
+    local dead_count=0
+
+    # Process each PID in the refs file
+    while read pid; do
+        [[ -z "$pid" ]] && continue  # Skip empty lines
+
+        if kill -0 "$pid" 2>/dev/null; then
+            # PID is alive - keep it
+            echo "$pid" >> "$temp_file"
+            ((alive_count++))
+        else
+            # PID is dead - don't keep it
+            ((dead_count++))
+        fi
+    done < "$refcount_file"
+
+    # If no alive PIDs remain, clean up the server
+    if [[ $alive_count -eq 0 ]]; then
+        # Kill server if it's still running
+        if [[ -f "$pid_file" ]]; then
+            local serena_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [[ -n "$serena_pid" ]]; then
+                kill "$serena_pid" 2>/dev/null || true
+            fi
+        fi
+        # Remove all cache files (port, pid, refs)
+        rm -f "${port_file}" "${pid_file}" "$temp_file" "$refcount_file"
+    else
+        # Update refs file with only alive PIDs
+        mv "$temp_file" "$refcount_file"
+    fi
+
+    # Silent operation - don't spam output on every wrapper call
+    return 0
+}
+
+# Server health monitoring and cross-monitor coordination
+# Phase 1: Simple CPU/memory checks with shared state file for consensus
+check_server_health_and_coordinate() {
+    local serena_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+    [[ -z "$serena_pid" ]] && return 0  # No server running
+
+    # Get CPU and memory usage using ps (portable, simple for Phase 1)
+    local cpu_mem=$(ps -p "$serena_pid" -o %cpu=,rss= 2>/dev/null || echo "0 0")
+    local cpu=$(echo "$cpu_mem" | awk '{print $1}')
+    local mem_kb=$(echo "$cpu_mem" | awk '{print $2}')
+    local mem_mb=$((mem_kb / 1024))
+
+    # Thresholds (Phase 1 conservative values)
+    local cpu_threshold=100  # >100% of one core
+    local mem_threshold=2048  # >2GB
+
+    # Check if thresholds exceeded
+    local issue_detected=0
+    local issue_type=""
+
+    if (( $(echo "$cpu > $cpu_threshold" | bc -l 2>/dev/null || echo 0) )); then
+        issue_detected=1
+        issue_type="cpu"
+    elif (( mem_mb > mem_threshold )); then
+        issue_detected=1
+        issue_type="memory"
+    fi
+
+    if (( issue_detected == 0 )); then
+        return 0  # Server is healthy
+    fi
+
+    # Issue detected - coordinate with other monitors via shared state file
+    local lockfile="${cache_dir}/health.lock"
+    local timestamp=$(date +%s)
+    local monitor_id=$$
+
+    (
+        exec 200>"$lockfile"
+        flock -x 200
+
+        # Read current health state
+        local warning_count=0
+        local first_warning_time=0
+        if [[ -f "$health_state_file" ]]; then
+            warning_count=$(grep -c "^warning:" "$health_state_file" 2>/dev/null || echo 0)
+            first_warning_time=$(grep "^first_warning:" "$health_state_file" | cut -d: -f2 || echo 0)
+        fi
+
+        # Append this monitor's observation
+        echo "warning:$timestamp:$monitor_id:$issue_type:cpu=${cpu}%:mem=${mem_mb}MB" >> "$health_state_file"
+
+        # Update first warning time if this is the first
+        if (( first_warning_time == 0 )); then
+            echo "first_warning:$timestamp" >> "$health_state_file"
+            first_warning_time=$timestamp
+        fi
+
+        # Count unique warnings in last 5 minutes (300 seconds)
+        local cutoff_time=$((timestamp - 300))
+        warning_count=$(awk -F: -v cutoff="$cutoff_time" '$1=="warning" && $2>=cutoff {print $3}' "$health_state_file" | sort -u | wc -l | tr -d ' ')
+
+        # Consensus logic: If 2+ monitors report issues, trigger notification
+        if (( warning_count >= 2 )); then
+            local duration=$((timestamp - first_warning_time))
+
+            # Send desktop notification (macOS only for Phase 1)
+            osascript -e "display notification \"CPU: ${cpu}%, Memory: ${mem_mb}MB - Duration: ${duration}s\" with title \"⚠️ Serena MCP Server Health Warning\" sound name \"Glass\"" 2>/dev/null || true
+
+            # Log to stderr so it appears in Claude session
+            echo "⚠️  WARNING: Serena server (PID $serena_pid) showing high resource usage:" >&2
+            echo "   CPU: ${cpu}% | Memory: ${mem_mb}MB | Duration: ${duration}s" >&2
+            echo "   Multiple monitors confirm issue. Check: tail -f $log_file" >&2
+
+            # Clean up old warnings to prevent state file bloat
+            awk -F: -v cutoff="$cutoff_time" '$1!="warning" || $2>=cutoff' "$health_state_file" > "$health_state_file.tmp"
+            mv "$health_state_file.tmp" "$health_state_file"
+        fi
+    )
+}
+
+# Function to monitor session and cleanup when it dies
+monitor_session() {
+    local session_pid="$1"
+    local health_check_count=0
+
+    while true; do
+        sleep ${health_check_interval}
+
+        # Check if session PID is still alive
+        if ! kill -0 "$session_pid" 2>/dev/null; then
+            # Session died, decrement reference count and cleanup if last reference
+            if ! decrement_refcount "$session_pid"; then
+                # Last reference removed - kill Serena server if we have a cached PID
+                if [[ -f "$pid_file" ]]; then
+                    local serena_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+                    if [[ -n "$serena_pid" ]]; then
+                        kill "$serena_pid" 2>/dev/null || true
+                    fi
+                fi
+                # Clean up cache files
+                rm -f "${port_file}" "${pid_file}"
+            fi
+            exit 0
+        fi
+
+        # NEW: Check server health every 4th cycle (4 minutes)
+        # Phase 1: Conservative monitoring with cross-monitor consensus
+        health_check_count=$((health_check_count + 1))
+        if (( health_check_count % 4 == 0 )); then
+            check_server_health_and_coordinate
+        fi
+    done
+}
+
+# Function to check if Serena is healthy on given port (macOS compatible)
 # CRITICAL: Do NOT use curl on /sse endpoint - SSE streams never terminate!
 # This was the root cause of all our "backgrounding" issues. The parent shell
 # was hanging waiting for curl to finish, which it never would on SSE endpoints.
 check_serena_health() {
     local port=$1
-    # Use /dev/tcp for instant port connectivity test (no HTTP, no hanging)
-    # Rationale: timeout 1 for fast failure on shells with long defaults (some use 10s+)
-    # /dev/tcp is bash built-in, works without external tools, tests raw TCP connectivity
-    timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/${port}" 2>/dev/null
+    # Use lsof for macOS compatibility (timeout not available by default)
+    # Tests if any process is listening on the port - reliable and fast
+    lsof -nP -iTCP:"${port}" -sTCP:LISTEN -t >/dev/null 2>&1
 }
 
 # Function to find a free port in the 9000-9999 range
@@ -132,6 +402,7 @@ acquire_lock() {
         if mkdir "$lock_dir" 2>/dev/null; then
             # Successfully acquired lock - record our PID for stale detection
             printf '%s\n' "$$" >"$lock_pid_file"
+            own_lock=1  # Track that we own this lock
             trap 'release_lock' EXIT INT TERM HUP  # Auto-cleanup on exit
             return 0
         fi
@@ -143,6 +414,7 @@ acquire_lock() {
             if [[ -n "$cached_port" ]] && check_serena_health "$cached_port"; then
                 # Healthy server found - export connection info and continue with existing server
                 export SERENA_URL="http://localhost:${cached_port}/sse"
+                own_lock=0  # We don't own the lock in follower mode
                 return 0  # Skip lock acquisition, use existing server
             fi
         fi
@@ -182,6 +454,11 @@ if ! acquire_lock; then
     exit 1
 fi
 
+# Clean up dead PIDs from reference file (auto-healing on startup)
+# Rationale: Prevents accumulation of stale references from crashed/force-quit sessions
+# If all refs are dead, this will kill the server and remove cache files
+cleanup_dead_refs
+
 # Check if we have a cached port and if Serena is still running
 # Rationale: Reuse existing healthy instances instead of starting duplicates
 if [[ -f "${port_file}" ]]; then
@@ -199,7 +476,6 @@ fi
 # Start Serena if we don't have a healthy instance
 if [[ ! -f "${port_file}" ]]; then
     port=$(find_free_port)
-    echo "Starting Serena MCP server on port ${port} for project: ${project_root##*/}"
     
     # Ensure log directory exists (nit-level: survives cache purges)
     mkdir -p "$(dirname "$log_file")"
@@ -219,12 +495,11 @@ if [[ ! -f "${port_file}" ]]; then
     echo "${serena_pid}" > "${pid_file}"    # Cache PID for process management
     echo "${port}" > "${port_file}" # Cache port for reuse
     
+    
     # Wait for Serena to be ready with safe health check
     # Rationale: Give Serena time to bind to port before Claude tries to connect
-    echo "Serena starting on port ${port}..."
     for i in {1..10}; do  # Max 5 seconds wait (10 * 0.5s)
         if check_serena_health "${port}"; then
-            echo "Serena ready on port ${port}"
             break
         fi
         sleep 0.5
@@ -237,8 +512,23 @@ else
     export SERENA_URL="http://localhost:${cached_port}/sse"
 fi
 
-# Lock will be automatically released by trap on exit
-# Rationale: Even if exec fails, cleanup happens via trap
+# Use session PID for reliable tracking across exec and add wrapper-scoped guard
+session_pid=$$
+
+if [[ -z "${SERENA_REFCOUNTED:-}" ]]; then
+    # Increment reference count for this session
+    increment_refcount "$session_pid"
+    export SERENA_REFCOUNTED=1
+    
+    # Always start per-session monitoring (not just on server start)
+    monitor_session "$session_pid" &
+fi
+
+# Explicitly release lock before exec if we own it (EXIT trap won't run after exec)
+if [[ "${own_lock:-0}" -eq 1 ]]; then
+    release_lock
+    trap - EXIT INT TERM HUP  # Remove trap since we handled cleanup explicitly
+fi
 
 # Execute the real Claude with all arguments (resolved at script start for micro-speed)
 # Rationale: exec replaces current process, so wrapper doesn't consume extra memory/PID
