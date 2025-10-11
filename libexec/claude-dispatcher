@@ -41,6 +41,10 @@ fi
 # Export real claude location for wrappers to use directly
 export CLAUDE_REAL_BINARY="$REAL_CLAUDE"
 
+# Export dispatcher path and command for wrapper re-dispatch
+export CLAUDE_DISPATCHER="$HOME/.config/claude/libexec/claude-dispatcher" 
+export CLAUDE_CMD_NAME="$CMD_NAME"
+
 # Build list of active shims
 ACTIVE_SHIMS=()
 if [[ "$USE_CCR" == "true" ]]; then

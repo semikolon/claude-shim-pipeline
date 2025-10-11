@@ -1,0 +1,230 @@
+#!/bin/bash
+# Enhanced Graphiti wrapper - Manages FalkorDB + sets per-session GROUP_ID
+# Part of composable Claude Code wrapper ecosystem
+#
+# ARCHITECTURE:
+#   - Single LaunchD Graphiti server at localhost:8000 (SSE transport)
+#   - Per-SSE-connection GROUP_ID scoping via query params: /sse?group_id=PROJECT
+#   - Wrapper sets GRAPHITI_GROUP_ID environment variable for this session
+#   - No per-project servers - all sessions connect to same server with different GROUP_ID
+#
+# Features: PID-based parent tracking prevents process accumulation
+
+set -euo pipefail
+
+# Configuration
+FALKORDB_CONTAINER_NAME="falkordb-graphiti"
+FALKORDB_IMAGE="falkordb/falkordb:latest"
+GRAPHITI_SERVER_DIR="/Users/fredrikbranstrom/Projects/graphiti-official/mcp_server"
+SERVER_TIMEOUT_MINUTES=0  # No timeout - servers run until manual shutdown
+HEALTH_CHECK_INTERVAL=60  # Check parent process every 60 seconds
+REFCOUNT_DIR="/tmp/graphiti-refs"  # Directory for reference counting lock files
+
+# Function to ensure FalkorDB is running
+ensure_falkordb() {
+    if ! docker ps --format "table {{.Names}}" | grep -q "^${FALKORDB_CONTAINER_NAME}$"; then
+        
+        # Remove any stopped container with same name
+        docker rm -f "${FALKORDB_CONTAINER_NAME}" 2>/dev/null || true
+        
+        # Start FalkorDB with auto-restart policy
+        docker run -d \
+            --name "${FALKORDB_CONTAINER_NAME}" \
+            --restart unless-stopped \
+            -p 6379:6379 -p 7687:7687 -p 3000:3000 \
+            -e REDIS_ARGS="--requirepass falkordb" \
+            -e FALKORDB_ARGS="BOLT_PORT 7687" \
+            "${FALKORDB_IMAGE}" > /dev/null
+        
+    fi
+}
+
+# Function to check if Graphiti server is running
+# NOTE: Single LaunchD server handles ALL group_ids via SSE query params
+is_server_running() {
+    # Check for any running Graphiti MCP server
+    pgrep -f "graphiti_mcp_server.py" > /dev/null 2>&1
+}
+
+# Reference counting functions for multi-session support (macOS compatible)
+increment_refcount() {
+    local group_id="$1"
+    local claude_pid="$2"
+    
+    mkdir -p "${REFCOUNT_DIR}"
+    local refcount_file="${REFCOUNT_DIR}/${group_id}.refs"
+    local lockdir="${REFCOUNT_DIR}/${group_id}.lockdir"
+    
+    # Atomic increment using mkdir lock for portability (no flock dependency)
+    local timeout=5
+    local start_time=$(date +%s)
+    
+    while :; do
+        if mkdir "$lockdir" 2>/dev/null; then
+            echo "$claude_pid" >> "$refcount_file"
+            rm -rf "$lockdir"
+            break
+        fi
+        
+        # Timeout check
+        local now=$(date +%s)
+        if [[ $((now - start_time)) -ge $timeout ]]; then
+            break  # Give up after timeout, don't block forever
+        fi
+        sleep 0.1
+    done
+}
+
+decrement_refcount() {
+    local group_id="$1"
+    local claude_pid="$2"
+    
+    local refcount_file="${REFCOUNT_DIR}/${group_id}.refs"
+    local lockdir="${REFCOUNT_DIR}/${group_id}.lockdir"
+    
+    if [[ ! -f "$refcount_file" ]]; then
+        return 0  # No refs to decrement
+    fi
+    
+    # Atomic decrement using mkdir lock for portability
+    local timeout=5
+    local start_time=$(date +%s)
+    
+    while :; do
+        if mkdir "$lockdir" 2>/dev/null; then
+            # Remove this PID from refcount file
+            if [[ -f "$refcount_file" ]]; then
+                grep -v "^$claude_pid$" "$refcount_file" > "$refcount_file.tmp" || true
+                mv "$refcount_file.tmp" "$refcount_file"
+                
+                # Check if file is empty (no more references)
+                if [[ ! -s "$refcount_file" ]]; then
+                    rm -f "$refcount_file"
+                    rm -rf "$lockdir"
+                    # Last reference removed
+                    return 1  # Signal to cleanup server
+                fi
+            fi
+            rm -rf "$lockdir"
+            break
+        fi
+        
+        # Timeout check
+        local now=$(date +%s)
+        if [[ $((now - start_time)) -ge $timeout ]]; then
+            return 0  # Give up, assume no cleanup needed
+        fi
+        sleep 0.1
+    done
+}
+
+get_refcount() {
+    local group_id="$1"
+    local refcount_file="${REFCOUNT_DIR}/${group_id}.refs"
+    
+    if [[ -f "$refcount_file" ]]; then
+        wc -l < "$refcount_file" | tr -d ' '
+    else
+        echo "0"
+    fi
+}
+
+# Function to start Graphiti server
+# NOTE: This function should NOT be called by wrapper - server managed by LaunchD
+# Keeping function for reference/emergency manual startup only
+start_graphiti_server() {
+    echo "⚠️  WARNING: Graphiti server should be managed by LaunchD" >&2
+    echo "   Service: com.fredrikbranstrom.graphiti" >&2
+    echo "   LaunchD handles single server for all GROUP_IDs via SSE transport" >&2
+    return 1
+}
+
+# Function to start per-session monitoring
+# NOTE: With LaunchD architecture, no per-group cleanup needed
+# Session cleanup only decrements reference count
+monitor_session() {
+    local group_id="$1"
+    local session_pid="$2"
+
+    while true; do
+        sleep ${HEALTH_CHECK_INTERVAL}
+
+        # Check if session PID is still alive
+        if ! kill -0 "$session_pid" 2>/dev/null; then
+            # Session died, decrement reference count
+            # No server cleanup - LaunchD manages single server for all sessions
+            decrement_refcount "$group_id" "$session_pid"
+            exit 0
+        fi
+    done
+}
+
+
+# Check for global scope override flag
+if [[ "${1:-}" == "--global-scope" ]]; then
+    # Use "default" as the global scope identifier
+    export GRAPHITI_GROUP_ID="default"
+    # Remove the flag from arguments before passing to next claude
+    shift
+elif [[ "${1:-}" == "--global" ]]; then
+    # Shorter alias for global scope
+    export GRAPHITI_GROUP_ID="default"
+    shift
+else
+    # Normal project-aware behavior
+    # Find git root, fall back to PWD for project detection
+    project_root=$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${PWD}")
+    
+    # Create human-readable, safe GROUP_ID from project name
+    # Converts "My-Project_Name" -> "my-project-name"
+    name=$(basename "$project_root")
+    export GRAPHITI_GROUP_ID=$(printf %s "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')
+fi
+
+# Ensure FalkorDB is running
+ensure_falkordb
+
+# Use session PID for reliable tracking across exec
+session_pid=$$
+
+# Add wrapper-scoped guard to prevent double counting  
+if [[ -z "${GRAPHITI_REFCOUNTED:-}" ]]; then
+    # Increment reference count for this session
+    increment_refcount "${GRAPHITI_GROUP_ID}" "$session_pid"
+    export GRAPHITI_REFCOUNTED=1
+    
+    # Always start per-session monitoring (not just on server start)
+    monitor_session "${GRAPHITI_GROUP_ID}" "$session_pid" &
+fi
+
+# Verify LaunchD Graphiti server is running
+# NOTE: Single server handles all GROUP_IDs - no per-project startup needed
+if ! is_server_running; then
+    echo "⚠️  WARNING: Graphiti MCP server not running" >&2
+    echo "   Expected LaunchD service: com.fredrikbranstrom.graphiti" >&2
+    echo "   Check: launchctl list | grep graphiti" >&2
+    echo "   Start: launchctl load ~/Library/LaunchAgents/com.fredrikbranstrom.graphiti.plist" >&2
+fi
+
+# Re-dispatch to continue pipeline unless we're in standalone mode
+if [[ -n "${CLAUDE_DISPATCHER:-}" ]] && [[ -n "${CLAUDE_CMD_NAME:-}" ]]; then
+    # Pipeline mode - re-dispatch to continue through remaining stages
+    exec "${CLAUDE_DISPATCHER}" "${CLAUDE_CMD_NAME}" "$@"
+else
+    # Standalone mode - find next claude in PATH
+    this_dir=$(dirname "$0")
+    filtered_path=$(echo "${PATH}" | tr ':' '\n' | grep -Fxv "${this_dir}" | paste -sd: -)
+    
+    if [[ -z "${filtered_path}" ]]; then
+        echo "❌ GRAPHITI: Could not filter PATH (broken wrapper chain)" >&2
+        exit 127
+    fi
+    
+    next_claude=$(PATH="${filtered_path}" command -v claude)
+    if [[ -z "${next_claude}" ]]; then
+        echo "❌ GRAPHITI: Could not find next 'claude' executable in chain" >&2
+        exit 127
+    fi
+    
+    exec "${next_claude}" "$@"
+fi
