@@ -14,7 +14,7 @@ shift
 
 # Configuration
 WRAPPER_BASE_DIR="$HOME/.config/claude/wrappers.d"
-WRAPPER_ORDER=("ccr" "serena")  # ccr first, then serena
+WRAPPER_ORDER=("ccr" "graphiti" "serena")  # ccr first, then graphiti, then serena
 
 # Check for --ccr flag and remove it from arguments
 ARGS=()
