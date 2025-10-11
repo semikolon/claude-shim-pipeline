@@ -56,6 +56,16 @@
 
 set -euo pipefail  # Fail fast on errors, undefined vars, pipe failures
 
+# Debug logging (inherits CLAUDE_DEBUG from dispatcher)
+if [[ "${CLAUDE_DEBUG:-0}" == "1" ]]; then
+    DEBUG_LOG="/tmp/claude-shims-debug.log"
+    exec 3>> "$DEBUG_LOG"
+    echo "=== SERENA WRAPPER START $(date '+%H:%M:%S.%N') ===" >&3
+    echo "PWD: $PWD" >&3
+    set -x
+    BASH_XTRACEFD=3
+fi
+
 # Find the real claude binary once (micro-speed optimization)
 # Rationale: Resolve claude path at start instead of at end to avoid redundant PATH operations
 # We must exclude our own directory to prevent infinite recursion
@@ -218,10 +228,10 @@ cleanup_dead_refs() {
         if kill -0 "$pid" 2>/dev/null; then
             # PID is alive - keep it
             echo "$pid" >> "$temp_file"
-            ((alive_count++))
+            ((++alive_count))
         else
             # PID is dead - don't keep it
-            ((dead_count++))
+            ((++dead_count))
         fi
     done < "$refcount_file"
 
@@ -532,4 +542,5 @@ fi
 
 # Execute the real Claude with all arguments (resolved at script start for micro-speed)
 # Rationale: exec replaces current process, so wrapper doesn't consume extra memory/PID
+[[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "SERENA: exec real claude ${real_claude}" >&3
 exec "${real_claude}" "$@"

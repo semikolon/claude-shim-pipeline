@@ -8,6 +8,17 @@
 
 set -euo pipefail
 
+# Debug logging (set CLAUDE_DEBUG=1 to enable)
+if [[ "${CLAUDE_DEBUG:-0}" == "1" ]]; then
+    DEBUG_LOG="/tmp/claude-shims-debug.log"
+    exec 3>> "$DEBUG_LOG"
+    echo "=== DISPATCHER START $(date '+%H:%M:%S.%N') ===" >&3
+    echo "Args: $*" >&3
+    echo "CLAUDE_PIPELINE_STAGE: ${CLAUDE_PIPELINE_STAGE:-unset}" >&3
+    set -x
+    BASH_XTRACEFD=3
+fi
+
 # First argument is the command name from the shim
 CMD_NAME="$1"
 shift
@@ -127,7 +138,9 @@ fi
 
 # Execute the chosen wrapper or fall back to real binary
 if [[ -n "$WRAPPER_TO_USE" ]]; then
+    [[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "DISPATCHER: exec wrapper $WRAPPER_TO_USE" >&3
     exec "$WRAPPER_TO_USE" "${ARGS[@]}"
 else
+    [[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "DISPATCHER: exec real claude $REAL_CLAUDE" >&3
     exec "$REAL_CLAUDE" "${ARGS[@]}"
 fi
