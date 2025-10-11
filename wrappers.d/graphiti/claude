@@ -12,6 +12,16 @@
 
 set -euo pipefail
 
+# Debug logging (inherits CLAUDE_DEBUG from dispatcher)
+if [[ "${CLAUDE_DEBUG:-0}" == "1" ]]; then
+    DEBUG_LOG="/tmp/claude-shims-debug.log"
+    exec 3>> "$DEBUG_LOG"
+    echo "=== GRAPHITI WRAPPER START $(date '+%H:%M:%S.%N') ===" >&3
+    echo "PWD: $PWD" >&3
+    set -x
+    BASH_XTRACEFD=3
+fi
+
 # Configuration
 FALKORDB_CONTAINER_NAME="falkordb-graphiti"
 FALKORDB_IMAGE="falkordb/falkordb:latest"
@@ -121,12 +131,56 @@ decrement_refcount() {
 get_refcount() {
     local group_id="$1"
     local refcount_file="${REFCOUNT_DIR}/${group_id}.refs"
-    
+
     if [[ -f "$refcount_file" ]]; then
         wc -l < "$refcount_file" | tr -d ' '
     else
         echo "0"
     fi
+}
+
+# Startup cleanup: Remove dead PIDs from reference file
+# Called once per wrapper invocation (when starting new Claude session)
+# Unlike Serena, does NOT kill server (LaunchD manages single global server)
+cleanup_dead_refs() {
+    local group_id="$1"
+    local refcount_file="${REFCOUNT_DIR}/${group_id}.refs"
+
+    # Early exit if no refs file exists yet
+    [[ ! -f "$refcount_file" ]] && return 0
+
+    # Use temp file for atomic update
+    local temp_file="${refcount_file}.tmp"
+    > "$temp_file"
+
+    local alive_count=0
+    local dead_count=0
+
+    # Process each PID in the refs file
+    while read pid; do
+        [[ -z "$pid" ]] && continue  # Skip empty lines
+
+        if kill -0 "$pid" 2>/dev/null; then
+            # PID is alive - keep it
+            echo "$pid" >> "$temp_file"
+            ((++alive_count))
+        else
+            # PID is dead - don't keep it
+            ((++dead_count))
+        fi
+    done < "$refcount_file"
+
+    # Update refs file with only alive PIDs (or remove if empty)
+    if [[ $alive_count -eq 0 ]]; then
+        # No alive sessions for this GROUP_ID - remove refcount file
+        rm -f "$temp_file" "$refcount_file"
+    else
+        # Update refs file with only alive PIDs
+        mv "$temp_file" "$refcount_file"
+    fi
+
+    # Silent operation - don't spam output on every wrapper call
+    return 0
 }
 
 # Function to start Graphiti server
@@ -184,10 +238,14 @@ fi
 # Ensure FalkorDB is running
 ensure_falkordb
 
+# Clean up dead PIDs from reference file (auto-healing on startup)
+# Prevents accumulation of stale references from crashed/force-quit sessions
+cleanup_dead_refs "${GRAPHITI_GROUP_ID}"
+
 # Use session PID for reliable tracking across exec
 session_pid=$$
 
-# Add wrapper-scoped guard to prevent double counting  
+# Add wrapper-scoped guard to prevent double counting
 if [[ -z "${GRAPHITI_REFCOUNTED:-}" ]]; then
     # Increment reference count for this session
     increment_refcount "${GRAPHITI_GROUP_ID}" "$session_pid"
@@ -209,22 +267,25 @@ fi
 # Re-dispatch to continue pipeline unless we're in standalone mode
 if [[ -n "${CLAUDE_DISPATCHER:-}" ]] && [[ -n "${CLAUDE_CMD_NAME:-}" ]]; then
     # Pipeline mode - re-dispatch to continue through remaining stages
+    [[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "GRAPHITI: re-dispatching to ${CLAUDE_DISPATCHER}" >&3
     exec "${CLAUDE_DISPATCHER}" "${CLAUDE_CMD_NAME}" "$@"
 else
     # Standalone mode - find next claude in PATH
+    [[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "GRAPHITI: standalone mode, finding next claude" >&3
     this_dir=$(dirname "$0")
     filtered_path=$(echo "${PATH}" | tr ':' '\n' | grep -Fxv "${this_dir}" | paste -sd: -)
-    
+
     if [[ -z "${filtered_path}" ]]; then
         echo "❌ GRAPHITI: Could not filter PATH (broken wrapper chain)" >&2
         exit 127
     fi
-    
+
     next_claude=$(PATH="${filtered_path}" command -v claude)
     if [[ -z "${next_claude}" ]]; then
         echo "❌ GRAPHITI: Could not find next 'claude' executable in chain" >&2
         exit 127
     fi
-    
+
+    [[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "GRAPHITI: exec next claude $next_claude" >&3
     exec "${next_claude}" "$@"
 fi
