@@ -25,19 +25,28 @@ shift
 
 # Configuration
 WRAPPER_BASE_DIR="$HOME/.config/claude/wrappers.d"
-WRAPPER_ORDER=("ccr" "graphiti" "serena")  # ccr first, then graphiti, then serena
+WRAPPER_ORDER=("ccr" "graphiti")  # ccr first, then graphiti (serena disabled 2025-12-21 due to persistent stability issues)
 
-# Check for --ccr flag and remove it from arguments
+# Check for custom flags and remove them from arguments
 ARGS=()
 USE_CCR=false
+USE_SAFE_MODE=false
 
 for arg in "$@"; do
     if [[ "$arg" == "--ccr" ]]; then
         USE_CCR=true
+    elif [[ "$arg" == "--safe" ]]; then
+        USE_SAFE_MODE=true
     else
         ARGS+=("$arg")
     fi
 done
+
+# Default to YOLO mode (--dangerously-skip-permissions) unless --safe is passed
+# Safety-net plugin provides protection against truly destructive commands
+if [[ "$USE_SAFE_MODE" != "true" ]]; then
+    ARGS+=("--dangerously-skip-permissions")
+fi
 
 # Find the real claude binary (excluding shims and wrappers)
 # Create a clean PATH without our managed directories
@@ -80,9 +89,26 @@ fi
 
 # Display the clean summary line (only on initial call, not recursive pipeline stages)
 PIPELINE_STAGE="${CLAUDE_PIPELINE_STAGE:-0}"
-if [[ ${#ACTIVE_SHIMS[@]} -gt 0 ]] && [[ "$PIPELINE_STAGE" -eq 0 ]]; then
-    shim_list=$(IFS=', '; echo "${ACTIVE_SHIMS[*]}")
-    echo "✨ Claude Code shims active: $shim_list" >&2
+if [[ "$PIPELINE_STAGE" -eq 0 ]]; then
+    # Build status components
+    STATUS_PARTS=()
+
+    # YOLO mode indicator
+    if [[ "$USE_SAFE_MODE" != "true" ]]; then
+        STATUS_PARTS+=("🔓 YOLO mode")
+    else
+        STATUS_PARTS+=("🔒 safe mode")
+    fi
+
+    # Active shims
+    if [[ ${#ACTIVE_SHIMS[@]} -gt 0 ]]; then
+        shim_list=$(IFS=', '; echo "${ACTIVE_SHIMS[*]}")
+        STATUS_PARTS+=("shims: $shim_list")
+    fi
+
+    # Display combined status
+    status_line=$(IFS=' | '; echo "${STATUS_PARTS[*]}")
+    echo "✨ Claude Code: $status_line" >&2
 fi
 
 # Find the first available wrapper based on mode and order
