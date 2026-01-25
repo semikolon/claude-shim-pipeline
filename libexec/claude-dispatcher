@@ -48,6 +48,11 @@ if [[ "$USE_SAFE_MODE" != "true" ]]; then
     ARGS+=("--dangerously-skip-permissions")
 fi
 
+# Local Ruby LSP plugin (bypasses broken marketplace plugin structure + exec() stdin race)
+if [[ -d "$HOME/.claude-plugin" ]]; then
+    ARGS+=("--plugin-dir" "$HOME/.claude-plugin")
+fi
+
 # Find the real claude binary (excluding shims and wrappers)
 # Create a clean PATH without our managed directories
 CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v -E "(claude/shims|claude/wrappers)" | tr '\n' ':' | sed 's/:$//')
@@ -65,21 +70,35 @@ export CLAUDE_REAL_BINARY="$REAL_CLAUDE"
 export CLAUDE_DISPATCHER="$HOME/.config/claude/libexec/claude-dispatcher" 
 export CLAUDE_CMD_NAME="$CMD_NAME"
 
-# Build list of active shims
+# Build list of active shims (for display only)
 ACTIVE_SHIMS=()
+# Shim descriptions (4-5 words max)
+declare -A SHIM_DESCRIPTIONS=(
+    ["graphiti"]="global and per-project memory"
+)
 if [[ "$USE_CCR" == "true" ]]; then
     # In CCR mode, check all available wrappers
     for wrapper in "${WRAPPER_ORDER[@]}"; do
         if [[ -x "$WRAPPER_BASE_DIR/$wrapper/$CMD_NAME" ]]; then
-            ACTIVE_SHIMS+=("$wrapper")
+            desc="${SHIM_DESCRIPTIONS[$wrapper]:-}"
+            if [[ -n "$desc" ]]; then
+                ACTIVE_SHIMS+=("$wrapper ($desc)")
+            else
+                ACTIVE_SHIMS+=("$wrapper")
+            fi
         fi
     done
 else
     # In default mode, all wrappers except CCR are enabled
+    # CCR is silently skipped - not shown in output
     for wrapper in "${WRAPPER_ORDER[@]}"; do
+        if [[ "$wrapper" == "ccr" ]]; then
+            continue  # Skip CCR entirely in output
+        fi
         if [[ -x "$WRAPPER_BASE_DIR/$wrapper/$CMD_NAME" ]]; then
-            if [[ "$wrapper" == "ccr" ]]; then
-                ACTIVE_SHIMS+=("ccr (skipping, use --ccr to enable)")
+            desc="${SHIM_DESCRIPTIONS[$wrapper]:-}"
+            if [[ -n "$desc" ]]; then
+                ACTIVE_SHIMS+=("$wrapper ($desc)")
             else
                 ACTIVE_SHIMS+=("$wrapper")
             fi
@@ -90,6 +109,23 @@ fi
 # Display the clean summary line (only on initial call, not recursive pipeline stages)
 PIPELINE_STAGE="${CLAUDE_PIPELINE_STAGE:-0}"
 if [[ "$PIPELINE_STAGE" -eq 0 ]]; then
+    # Check daemon health (super concise)
+    DAEMON_STATUS=""
+    # TTS daemon: check launchctl (PID in first column = running)
+    tts_info=$(launchctl list 2>/dev/null | grep "tts-daemon" || echo "- -")
+    tts_pid=$(echo "$tts_info" | awk '{print $1}')
+    if [[ "$tts_pid" != "-" && "$tts_pid" =~ ^[0-9]+$ ]]; then
+        DAEMON_STATUS+="T✓"
+    else
+        DAEMON_STATUS+="T✗"
+    fi
+    # Graphiti daemon
+    if pgrep -f "graphiti_mcp_server" > /dev/null 2>&1; then
+        DAEMON_STATUS+="G✓"
+    else
+        DAEMON_STATUS+="G✗"
+    fi
+
     # Build status components
     STATUS_PARTS=()
 
@@ -103,12 +139,19 @@ if [[ "$PIPELINE_STAGE" -eq 0 ]]; then
     # Active shims
     if [[ ${#ACTIVE_SHIMS[@]} -gt 0 ]]; then
         shim_list=$(IFS=', '; echo "${ACTIVE_SHIMS[*]}")
-        STATUS_PARTS+=("shims: $shim_list")
+        STATUS_PARTS+=("SHIMS: $shim_list")
     fi
 
-    # Display combined status
-    status_line=$(IFS=' | '; echo "${STATUS_PARTS[*]}")
-    echo "✨ Claude Code: $status_line" >&2
+    # Display combined status with middle dot separator
+    # Join array elements with ' · ' (IFS only uses first char, so build manually)
+    status_line=""
+    for i in "${!STATUS_PARTS[@]}"; do
+        if [[ $i -gt 0 ]]; then
+            status_line+=" · "
+        fi
+        status_line+="${STATUS_PARTS[$i]}"
+    done
+    echo "✨ Claude Code: $status_line · $DAEMON_STATUS" >&2
 fi
 
 # Find the first available wrapper based on mode and order
@@ -129,7 +172,7 @@ if [[ "$USE_CCR" == "true" ]]; then
         else
             # Skip missing wrapper by incrementing stage and re-dispatching
             export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
-            exec "$0" "$CMD_NAME" "$@"
+            exec "$0" "$CMD_NAME" "${ARGS[@]}"
         fi
     else
         # End of pipeline - all wrappers have run, use real Claude
@@ -142,11 +185,11 @@ else
         # Get current wrapper name from array
         WRAPPER_NAME="${WRAPPER_ORDER[PIPELINE_STAGE]}"
         WRAPPER_PATH="$WRAPPER_BASE_DIR/$WRAPPER_NAME/$CMD_NAME"
-        
+
         if [[ "$WRAPPER_NAME" == "ccr" ]]; then
             # Skip CCR in default mode by incrementing stage and re-dispatching
             export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
-            exec "$0" "$CMD_NAME" "$@"
+            exec "$0" "$CMD_NAME" "${ARGS[@]}"
         elif [[ -x "$WRAPPER_PATH" ]]; then
             # Execute non-CCR wrapper with incremented stage for next iteration
             export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
@@ -154,7 +197,7 @@ else
         else
             # Skip missing wrapper by incrementing stage and re-dispatching
             export CLAUDE_PIPELINE_STAGE=$((PIPELINE_STAGE + 1))
-            exec "$0" "$CMD_NAME" "$@"
+            exec "$0" "$CMD_NAME" "${ARGS[@]}"
         fi
     else
         # End of pipeline - all wrappers have run, use real Claude
