@@ -19,22 +19,25 @@ The installer uses Gum for a beautiful TUI experience. If Gum is not installed, 
 
 ### Testing the Pipeline
 ```bash
-# Test basic functionality (default: all wrappers except CCR)
+# Test basic functionality (default: graphiti wrapper, CCR skipped)
 claude --version
-# Should show: ✨ Claude Code shims active: serena, ccr (skipping, use --ccr to enable)
+# Should show: ✨ Claude Code: 🔓 YOLO mode · SHIMS: graphiti (global and per-project memory) · T✓G✓
 
-# Test CCR mode (enables full pipeline)
-claude --ccr --add-dir ~/project
-# Should show: ✨ Claude Code shims active: ccr, serena
+# Verify PATH order (shim must be first)
+which -a claude | head -2
+# Expected:
+# ~/.config/claude/shims/claude   ← FIRST
+# ~/.local/bin/claude             ← Native binary
 ```
 
 ### Debugging
 ```bash
-# Check for running Serena instances
-ls ~/.cache/serena/*/port
+# Enable debug logging
+CLAUDE_DEBUG=1 claude --version
+cat /tmp/claude-shims-debug.log
 
-# Check CCR status
-ccr status
+# Check Graphiti daemon status (shown in status line as G✓/G✗)
+pgrep -f graphiti_mcp_server
 
 # Reset pipeline stages if stuck
 unset CLAUDE_PIPELINE_STAGE
@@ -73,7 +76,7 @@ The `CLAUDE_PIPELINE_STAGE` environment variable tracks progression through the 
 
 Wrappers are executed in the order defined by `WRAPPER_ORDER` array in the dispatcher:
 ```bash
-WRAPPER_ORDER=("ccr" "serena")  # ccr first, then serena
+WRAPPER_ORDER=("ccr" "graphiti")  # ccr first, then graphiti (serena disabled 2025-12)
 ```
 
 ## Key Design Principles
@@ -96,9 +99,9 @@ WRAPPER_ORDER=("ccr" "serena")  # ccr first, then serena
 │   └── claude-dispatcher         # Central pipeline orchestrator
 └── wrappers.d/                   # Wrapper implementations
     ├── ccr/
-    │   └── claude                # Claude Code Router integration
-    └── serena/
-        └── claude                # Serena MCP server integration
+    │   └── claude                # Claude Code Router (--ccr flag)
+    └── graphiti/
+        └── claude                # Graphiti GROUP_ID injection
 ```
 
 ## Wrapper Development
@@ -128,20 +131,16 @@ exec "$next_claude" "$@"
 
 ### CCR (Claude Code Router)
 - **Purpose**: Routes requests to different models/providers
-- **Features**: Auto-starts CCR service, path handling for pipeline vs standalone mode
 - **Default Mode**: Skipped by default (must use `--ccr` flag to enable)
 - **Fallback**: Passes through if CCR unavailable
 
-### Serena MCP Server
-- **Purpose**: Auto-manages Serena MCP servers per project
-- **Features**: 
+### Graphiti (Knowledge Graph)
+- **Purpose**: Sets per-project GROUP_ID for knowledge graph isolation
+- **Features**:
   - Project detection using git root or current directory
-  - Automatic startup with unique ports (9000-9999)
-  - Process management using uvx + nohup
-  - Health checking with /dev/tcp (avoids SSE hangs)
-  - File locking prevents race conditions
-  - Cache system reuses existing healthy servers per project
-- **Cache Location**: `~/.cache/serena/<project-hash>/`
+  - Exports `GRAPHITI_GROUP_ID` based on project name
+  - Uses FalkorDBLite (embedded, no Docker needed)
+- **Global scope**: Use `--global-scope` flag for cross-project memory
 
 ## Architecture Decisions
 
@@ -154,7 +153,13 @@ exec "$next_claude" "$@"
 - **Direct Chaining Problems**: Each wrapper needs to know about next wrapper, complex PATH manipulation
 - **Pipeline Benefits**: Clean separation, easy composition, graceful degradation
 
-### Process Management (Serena)
-- **Health Checking**: Uses `/dev/tcp` instead of curl to avoid SSE streaming hangs
-- **Locking**: mkdir-based locking is portable across macOS/Linux and atomic
-- **Backgrounding**: nohup+disown is simpler and more reliable than script/setsid
+### PATH Ordering (Critical!)
+The shims directory MUST appear BEFORE the real binary in PATH. Common mistake: adding `~/.local/bin` to PATH AFTER the shims export pushes it to the front, bypassing shims entirely.
+
+**Correct order in ~/.zshrc**:
+```bash
+export PATH="$HOME/.local/bin:$PATH"      # Real binary location
+export PATH="$HOME/.config/claude/shims:$PATH"  # MUST be last (ends up first)
+```
+
+**Verify with**: `which -a claude | head -2` - shims directory should be first.
