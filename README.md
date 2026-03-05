@@ -118,6 +118,27 @@ The `CLAUDE_PIPELINE_STAGE` environment variable tracks progression:
 - **Clean Summary**: Shows single line of active shims instead of verbose debug
 - **Fallback Safety**: Always reaches real Claude binary even if wrappers fail
 
+## 🧭 Codex Shim Pipeline (Companion)
+
+Codex uses a parallel shim pipeline under `~/.config/codex/` to keep behavior symmetric with Claude.
+
+**Structure**:
+```
+~/.config/codex/
+├── shims/
+│   └── codex                  # PATH interception point
+├── libexec/
+│   ├── codex-dispatcher       # Central pipeline orchestrator
+│   └── graphiti-stdio-launcher # Stdio launcher (uses GRAPHITI_GROUP_ID)
+└── wrappers.d/
+    └── graphiti/
+        └── codex              # Sets GRAPHITI_GROUP_ID (project-aware)
+```
+
+**Notes**:
+- Codex prefers stdio/streamable HTTP transports; SSE is not reliably supported.
+- The Graphiti wrapper mirrors Claude’s project scoping and passes `GRAPHITI_GROUP_ID` into the stdio launcher.
+
 ### 3. CCR Wrapper (`wrappers.d/ccr/claude`)
 
 **Purpose**: Integrate Claude Code Router for model routing and request manipulation

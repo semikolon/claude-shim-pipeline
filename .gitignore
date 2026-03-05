@@ -2,6 +2,12 @@
 *.log
 .DS_Store
 
+# Tool-specific local data (not part of shims pipeline)
+.claude/
+.serena/
+.ruby-lsp/
+.crush/
+
 # User-specific configurations
 local/
 
