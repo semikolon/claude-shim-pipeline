@@ -156,7 +156,7 @@ exec "$next_claude" "$@"
 ### PATH Ordering (Critical!)
 The shims directory MUST appear BEFORE the real binary in PATH. Common mistake: adding `~/.local/bin` to PATH AFTER the shims export pushes it to the front, bypassing shims entirely.
 
-**Correct order in ~/.zshrc**:
+**Correct order in ~/.zshenv** (or ~/.zshrc):
 ```bash
 export PATH="$HOME/.local/bin:$PATH"      # Real binary location
 export PATH="$HOME/.config/claude/shims:$PATH"  # MUST be last (ends up first)

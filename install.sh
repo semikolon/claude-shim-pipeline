@@ -384,7 +384,7 @@ update_path() {
     # Detect shell and update appropriate config file
     local shell_config=""
     if [[ "$SHELL" == */zsh ]]; then
-        shell_config="$HOME/.zshrc"
+        shell_config="$HOME/.zshenv"
     elif [[ "$SHELL" == */bash ]]; then
         shell_config="$HOME/.bash_profile"
         [[ ! -f "$shell_config" ]] && shell_config="$HOME/.bashrc"
