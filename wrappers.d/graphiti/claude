@@ -2,15 +2,15 @@
 # Graphiti wrapper - Sets per-session GROUP_ID for knowledge graph isolation
 # Part of composable Claude Code wrapper ecosystem
 #
-# ARCHITECTURE (Jan 2026):
-#   - FalkorDBLite: Embedded graph DB in MCP server process (no Docker!)
-#   - Stdio transport: Per-session subprocess, no shared server
+# ARCHITECTURE (Mar 2026):
+#   - Stdio transport: Per-session Graphiti subprocesses
+#   - Shared DB: launchd-managed local FalkorDB singleton
 #   - GROUP_ID: Derived from git project for knowledge isolation
 #
 # WHAT THIS WRAPPER DOES:
 #   1. Computes GRAPHITI_GROUP_ID from git project (or "default" for global scope)
-#   2. Exports USE_FALKORDBLITE=1 (embedded mode, no Docker needed)
-#   3. Re-dispatches to continue wrapper pipeline
+#   2. Re-dispatches to continue wrapper pipeline
+#   3. Leaves DB mode to the Graphiti launcher + mcp_server/.env
 #
 # HISTORY:
 #   - Pre-Jan 2026: Docker container + SSE transport + refcounting
@@ -29,9 +29,6 @@ if [[ "${CLAUDE_DEBUG:-0}" == "1" ]]; then
     BASH_XTRACEFD=3
 fi
 
-# FalkorDBLite is now the default - no Docker needed
-export USE_FALKORDBLITE=1
-
 # Check for global scope override flag
 if [[ "${1:-}" == "--global-scope" ]] || [[ "${1:-}" == "--global" ]]; then
     # Use "default" as the global scope identifier
@@ -49,7 +46,7 @@ else
     export GRAPHITI_GROUP_ID=$(printf %s "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')
 fi
 
-[[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "GRAPHITI: GROUP_ID=${GRAPHITI_GROUP_ID}, FalkorDBLite=${USE_FALKORDBLITE}" >&3
+[[ "${CLAUDE_DEBUG:-0}" == "1" ]] && echo "GRAPHITI: GROUP_ID=${GRAPHITI_GROUP_ID}" >&3
 
 # Re-dispatch to continue pipeline unless we're in standalone mode
 if [[ -n "${CLAUDE_DISPATCHER:-}" ]] && [[ -n "${CLAUDE_CMD_NAME:-}" ]]; then

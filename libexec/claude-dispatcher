@@ -72,15 +72,17 @@ export CLAUDE_CMD_NAME="$CMD_NAME"
 
 # Build list of active shims (for display only)
 ACTIVE_SHIMS=()
-# Shim descriptions (4-5 words max)
-declare -A SHIM_DESCRIPTIONS=(
-    ["graphiti"]="global and per-project memory"
-)
+# Shim descriptions (4-5 words max) — bash 3.2 compatible (no declare -A)
+get_shim_desc() {
+    case "$1" in
+        graphiti) echo "global and per-project memory" ;;
+    esac
+}
 if [[ "$USE_CCR" == "true" ]]; then
     # In CCR mode, check all available wrappers
     for wrapper in "${WRAPPER_ORDER[@]}"; do
         if [[ -x "$WRAPPER_BASE_DIR/$wrapper/$CMD_NAME" ]]; then
-            desc="${SHIM_DESCRIPTIONS[$wrapper]:-}"
+            desc="$(get_shim_desc "$wrapper")"
             if [[ -n "$desc" ]]; then
                 ACTIVE_SHIMS+=("$wrapper ($desc)")
             else
@@ -96,7 +98,7 @@ else
             continue  # Skip CCR entirely in output
         fi
         if [[ -x "$WRAPPER_BASE_DIR/$wrapper/$CMD_NAME" ]]; then
-            desc="${SHIM_DESCRIPTIONS[$wrapper]:-}"
+            desc="$(get_shim_desc "$wrapper")"
             if [[ -n "$desc" ]]; then
                 ACTIVE_SHIMS+=("$wrapper ($desc)")
             else
