@@ -150,9 +150,9 @@ if [[ "$PIPELINE_STAGE" -eq 0 ]]; then
 
     # YOLO mode indicator
     if [[ "$USE_SAFE_MODE" != "true" ]]; then
-        STATUS_PARTS+=("🔓 YOLO mode")
+        STATUS_PARTS+=("YOLO mode")
     else
-        STATUS_PARTS+=("🔒 safe mode")
+        STATUS_PARTS+=("safe mode")
     fi
 
     # Active shims
