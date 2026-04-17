@@ -19,6 +19,16 @@ if [[ "${CLAUDE_DEBUG:-0}" == "1" ]]; then
     BASH_XTRACEFD=3
 fi
 
+# Enable Claude Code's fullscreen / NO_FLICKER rendering path for every CC session.
+# Fixes: streaming-redraw garbled-text overlap, CSI 3J scrollback-clear viewport jumps,
+# macOS focus-out scroll snap, and mid-stream auto-scroll-to-bottom while reading.
+# Architectural fix — the alt-screen renderer owns its own scroll state and does not
+# touch the terminal's scrollback. Requires Claude Code >= 2.1.89; a no-op otherwise.
+# Research: ~/dotfiles/docs/ghostty-scroll-jump-in-claude-code-whyyy-research-by-gpt-54.md
+# Docs:     https://code.claude.com/docs/en/fullscreen
+# Escape hatch: run `CLAUDE_CODE_NO_FLICKER=0 claude` to fall back to the legacy renderer.
+export CLAUDE_CODE_NO_FLICKER="${CLAUDE_CODE_NO_FLICKER:-1}"
+
 # First argument is the command name from the shim
 CMD_NAME="$1"
 shift
