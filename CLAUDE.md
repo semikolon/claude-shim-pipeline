@@ -21,7 +21,7 @@ The installer uses Gum for a beautiful TUI experience. If Gum is not installed, 
 ```bash
 # Test basic functionality (default: graphiti wrapper, CCR skipped)
 claude --version
-# Should show: ✨ Claude Code: 🔓 YOLO mode · SHIMS: graphiti (global and per-project memory) · T✓G✓
+# Should show: ✨ Claude Code: 🔓 YOLO mode | shims: graphiti
 
 # Verify PATH order (shim must be first)
 which -a claude | head -2
@@ -154,12 +154,27 @@ exec "$next_claude" "$@"
 - **Pipeline Benefits**: Clean separation, easy composition, graceful degradation
 
 ### PATH Ordering (Critical!)
-The shims directory MUST appear BEFORE the real binary in PATH. Common mistake: adding `~/.local/bin` to PATH AFTER the shims export pushes it to the front, bypassing shims entirely.
+The shims directory MUST appear BEFORE the real binary in PATH.
 
-**Correct order in ~/.zshenv** (or ~/.zshrc):
+**Known pitfall — nvm lazy-load** (Apr 4, 2026): `.zshenv` correctly prepends shims, but `.zshrc` line `export PATH="$(npm prefix -g)/bin:$PATH"` triggers nvm lazy-load which prepends nvm's node path — burying shims. Fix: `.zshrc` re-prepends shims at the end, after all PATH mutations. Without this, `claude` resolves to the nvm-installed binary (no YOLO mode, no plugin-dir).
+
+**Correct setup**:
 ```bash
-export PATH="$HOME/.local/bin:$PATH"      # Real binary location
-export PATH="$HOME/.config/claude/shims:$PATH"  # MUST be last (ends up first)
+# In .zshenv (for non-interactive SSH):
+export PATH="$HOME/.config/claude/shims:$HOME/.config/codex/shims:$PATH"
+
+# At END of .zshrc (after nvm, npm, rbenv, etc.):
+export PATH="$HOME/.config/claude/shims:$HOME/.config/codex/shims:$PATH"
 ```
 
 **Verify with**: `which -a claude | head -2` - shims directory should be first.
+
+### Passthrough Mode (Apr 4, 2026)
+
+Meta commands bypass session flags and the wrapper pipeline entirely:
+- **Flag-based**: `--version`, `-v`, `--help`, `-h`
+- **Subcommand-based**: `agents`, `auth`, `auto-mode`, `doctor`, `install`, `mcp`, `plugin`, `plugins`, `setup-token`, `update`, `upgrade`
+
+These exec straight to the real Claude binary — no YOLO flag, no plugin-dir, no wrapper startup. Prevents hangs from wrappers probing daemon health or starting MCP servers for non-session commands.
+
+Also deduplicates `--dangerously-skip-permissions` and `--plugin-dir` when wrappers re-dispatch through the pipeline (each wrapper calls the dispatcher again, which previously re-injected these flags).

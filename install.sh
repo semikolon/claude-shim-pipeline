@@ -221,10 +221,33 @@ WRAPPER_ORDER=("ccr" "serena")  # ccr first, then serena
 # Check for --ccr flag and remove it from arguments
 ARGS=()
 USE_CCR=false
+PASSTHROUGH_MODE=false
+FIRST_NON_FLAG=""
+HAS_DANGEROUSLY_SKIP=false
+HAS_PLUGIN_DIR=false
+EXPECT_PLUGIN_DIR_PATH=false
 
 for arg in "$@"; do
+    if [[ "$EXPECT_PLUGIN_DIR_PATH" == "true" ]]; then
+        EXPECT_PLUGIN_DIR_PATH=false
+        ARGS+=("$arg")
+        continue
+    fi
+    if [[ -z "$FIRST_NON_FLAG" && "$arg" != -* ]]; then
+        FIRST_NON_FLAG="$arg"
+    fi
     if [[ "$arg" == "--ccr" ]]; then
         USE_CCR=true
+    elif [[ "$arg" == "--dangerously-skip-permissions" ]]; then
+        HAS_DANGEROUSLY_SKIP=true
+        ARGS+=("$arg")
+    elif [[ "$arg" == "--plugin-dir" ]]; then
+        HAS_PLUGIN_DIR=true
+        EXPECT_PLUGIN_DIR_PATH=true
+        ARGS+=("$arg")
+    elif [[ "$arg" == "--version" || "$arg" == "-v" || "$arg" == "--help" || "$arg" == "-h" ]]; then
+        PASSTHROUGH_MODE=true
+        ARGS+=("$arg")
     else
         ARGS+=("$arg")
     fi
@@ -242,6 +265,17 @@ fi
 
 # Export real claude location for wrappers to use directly
 export CLAUDE_REAL_BINARY="$REAL_CLAUDE"
+
+# Management/meta commands should bypass wrapper startup entirely.
+case "$FIRST_NON_FLAG" in
+    agents|auth|auto-mode|doctor|install|mcp|plugin|plugins|setup-token|update|upgrade)
+        PASSTHROUGH_MODE=true
+        ;;
+esac
+
+if [[ "$PASSTHROUGH_MODE" == "true" ]]; then
+    exec "$REAL_CLAUDE" "${ARGS[@]}"
+fi
 
 # Build list of active shims
 ACTIVE_SHIMS=()

@@ -41,27 +41,39 @@ WRAPPER_ORDER=("ccr" "graphiti")  # ccr first, then graphiti (serena disabled 20
 ARGS=()
 USE_CCR=false
 USE_SAFE_MODE=false
+PASSTHROUGH_MODE=false
+FIRST_NON_FLAG=""
+HAS_DANGEROUSLY_SKIP=false
+HAS_PLUGIN_DIR=false
+EXPECT_PLUGIN_DIR_PATH=false
 
 for arg in "$@"; do
+    if [[ "$EXPECT_PLUGIN_DIR_PATH" == "true" ]]; then
+        EXPECT_PLUGIN_DIR_PATH=false
+        ARGS+=("$arg")
+        continue
+    fi
+    if [[ -z "$FIRST_NON_FLAG" && "$arg" != -* ]]; then
+        FIRST_NON_FLAG="$arg"
+    fi
     if [[ "$arg" == "--ccr" ]]; then
         USE_CCR=true
     elif [[ "$arg" == "--safe" ]]; then
         USE_SAFE_MODE=true
+    elif [[ "$arg" == "--dangerously-skip-permissions" ]]; then
+        HAS_DANGEROUSLY_SKIP=true
+        ARGS+=("$arg")
+    elif [[ "$arg" == "--plugin-dir" ]]; then
+        HAS_PLUGIN_DIR=true
+        EXPECT_PLUGIN_DIR_PATH=true
+        ARGS+=("$arg")
+    elif [[ "$arg" == "--version" || "$arg" == "-v" || "$arg" == "--help" || "$arg" == "-h" ]]; then
+        PASSTHROUGH_MODE=true
+        ARGS+=("$arg")
     else
         ARGS+=("$arg")
     fi
 done
-
-# Default to YOLO mode (--dangerously-skip-permissions) unless --safe is passed
-# Safety-net plugin provides protection against truly destructive commands
-if [[ "$USE_SAFE_MODE" != "true" ]]; then
-    ARGS+=("--dangerously-skip-permissions")
-fi
-
-# Local Ruby LSP plugin (bypasses broken marketplace plugin structure + exec() stdin race)
-if [[ -d "$HOME/.claude-plugin" ]]; then
-    ARGS+=("--plugin-dir" "$HOME/.claude-plugin")
-fi
 
 # Find the real claude binary (excluding shims and wrappers)
 # Create a clean PATH without our managed directories
@@ -79,6 +91,28 @@ export CLAUDE_REAL_BINARY="$REAL_CLAUDE"
 # Export dispatcher path and command for wrapper re-dispatch
 export CLAUDE_DISPATCHER="$HOME/.config/claude/libexec/claude-dispatcher" 
 export CLAUDE_CMD_NAME="$CMD_NAME"
+
+# Management/meta commands should bypass session flags and wrappers entirely.
+case "$FIRST_NON_FLAG" in
+    agents|auth|auto-mode|doctor|install|mcp|plugin|plugins|setup-token|update|upgrade)
+        PASSTHROUGH_MODE=true
+        ;;
+esac
+
+if [[ "$PASSTHROUGH_MODE" != "true" ]]; then
+    # Default to YOLO mode (--dangerously-skip-permissions) unless --safe is passed
+    # Safety-net plugin provides protection against truly destructive commands
+    if [[ "$USE_SAFE_MODE" != "true" && "$HAS_DANGEROUSLY_SKIP" != "true" ]]; then
+        ARGS+=("--dangerously-skip-permissions")
+    fi
+
+    # Local Ruby LSP plugin (bypasses broken marketplace plugin structure + exec() stdin race)
+    if [[ -d "$HOME/.claude-plugin" && "$HAS_PLUGIN_DIR" != "true" ]]; then
+        ARGS+=("--plugin-dir" "$HOME/.claude-plugin")
+    fi
+else
+    exec "$REAL_CLAUDE" "${ARGS[@]}"
+fi
 
 # Build list of active shims (for display only)
 ACTIVE_SHIMS=()
@@ -121,31 +155,14 @@ fi
 # Display the clean summary line (only on initial call, not recursive pipeline stages)
 PIPELINE_STAGE="${CLAUDE_PIPELINE_STAGE:-0}"
 if [[ "$PIPELINE_STAGE" -eq 0 ]]; then
-    # Check daemon health (super concise)
-    DAEMON_STATUS=""
-    # TTS daemon: check launchctl (PID in first column = running)
-    tts_info=$(launchctl list 2>/dev/null | grep "tts-daemon" || echo "- -")
-    tts_pid=$(echo "$tts_info" | awk '{print $1}')
-    if [[ "$tts_pid" != "-" && "$tts_pid" =~ ^[0-9]+$ ]]; then
-        DAEMON_STATUS+="T✓"
-    else
-        DAEMON_STATUS+="T✗"
-    fi
-    # Graphiti daemon
-    if pgrep -f "graphiti_mcp_server" > /dev/null 2>&1; then
-        DAEMON_STATUS+="G✓"
-    else
-        DAEMON_STATUS+="G✗"
-    fi
-
     # Build status components
     STATUS_PARTS=()
 
     # YOLO mode indicator
     if [[ "$USE_SAFE_MODE" != "true" ]]; then
-        STATUS_PARTS+=("🔓 YOLO mode")
+        STATUS_PARTS+=("YOLO mode")
     else
-        STATUS_PARTS+=("🔒 safe mode")
+        STATUS_PARTS+=("safe mode")
     fi
 
     # Active shims
@@ -163,7 +180,7 @@ if [[ "$PIPELINE_STAGE" -eq 0 ]]; then
         fi
         status_line+="${STATUS_PARTS[$i]}"
     done
-    echo "✨ Claude Code: $status_line · $DAEMON_STATUS" >&2
+    echo "✨ Claude Code: $status_line" >&2
 fi
 
 # Find the first available wrapper based on mode and order
