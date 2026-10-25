@@ -46,6 +46,7 @@ FIRST_NON_FLAG=""
 HAS_DANGEROUSLY_SKIP=false
 HAS_PLUGIN_DIR=false
 EXPECT_PLUGIN_DIR_PATH=false
+HAS_TERMINAL_MCP_CONFIG=false
 
 for arg in "$@"; do
     if [[ "$EXPECT_PLUGIN_DIR_PATH" == "true" ]]; then
@@ -66,6 +67,9 @@ for arg in "$@"; do
     elif [[ "$arg" == "--plugin-dir" ]]; then
         HAS_PLUGIN_DIR=true
         EXPECT_PLUGIN_DIR_PATH=true
+        ARGS+=("$arg")
+    elif [[ "$arg" == --mcp-config=* ]]; then
+        HAS_TERMINAL_MCP_CONFIG=true
         ARGS+=("$arg")
     elif [[ "$arg" == "--version" || "$arg" == "-v" || "$arg" == "--help" || "$arg" == "-h" ]]; then
         PASSTHROUGH_MODE=true
@@ -109,6 +113,14 @@ if [[ "$PASSTHROUGH_MODE" != "true" ]]; then
     # Local Ruby LSP plugin (bypasses broken marketplace plugin structure + exec() stdin race)
     if [[ -d "$HOME/.claude-plugin" && "$HAS_PLUGIN_DIR" != "true" ]]; then
         ARGS+=("--plugin-dir" "$HOME/.claude-plugin")
+    fi
+
+    # MCP servers for terminal sessions only. The desktop app runs its own claude
+    # binary without this dispatcher, so servers listed here never start there.
+    # The "=" form keeps the variadic --mcp-config from swallowing later arguments.
+    TERMINAL_MCP_CONFIG="$HOME/.claude/mcp-terminal-only.json"
+    if [[ -f "$TERMINAL_MCP_CONFIG" && "$HAS_TERMINAL_MCP_CONFIG" != "true" ]]; then
+        ARGS+=("--mcp-config=$TERMINAL_MCP_CONFIG")
     fi
 else
     exec "$REAL_CLAUDE" "${ARGS[@]}"
