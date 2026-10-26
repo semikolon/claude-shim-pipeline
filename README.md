@@ -48,6 +48,16 @@ flowchart TD
 4. **Safe Fallbacks**: Missing tools are skipped gracefully, always reaches real Claude
 5. **Mode Support**: `--ccr` flag enables CCR wrapper (skipped by default)
 
+### Flags the dispatcher adds to session commands
+
+Meta commands (`--version`, `--help`, `mcp`, `update`, `auth`, ...) pass straight through. Every other invocation gets:
+
+- `--dangerously-skip-permissions`, unless `--safe` is given (a safety-net plugin blocks destructive commands)
+- `--plugin-dir ~/.claude-plugin`, when that directory exists
+- `--mcp-config=~/.claude/mcp-terminal-only.json`, when that file exists: MCP servers for terminal sessions only. Claude Code starts a copy of each stdio server per session, so servers that a desktop client does not need belong here rather than in `~/.claude.json`. The `=` form keeps the multi-value flag from swallowing a prompt that follows.
+
+Each flag is added once, also when a wrapper re-dispatches.
+
 ## 📁 File Structure
 
 ```
